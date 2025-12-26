@@ -1,0 +1,367 @@
+default_config:
+
+stream:
+
+# ============================================================
+# RENTLY (thermostat + door)
+# ============================================================
+
+input_boolean:
+  rently_syncing:
+    name: Rently Syncing
+
+input_number:
+  rently_thermostat_setpoint:
+    name: Thermostat Setpoint
+    min: 50
+    max: 90
+    step: 1
+
+  rently_current_temp:
+    name: Current Temperature
+    min: 32
+    max: 120
+    step: 1
+
+input_select:
+  rently_thermostat_mode:
+    name: Thermostat Mode
+    options:
+      - "off"
+      - "cool"
+      - "heat"
+
+  # Bed massage: 3-state selector
+  bed_massage_level:
+    name: Bed Massage Level
+    options:
+      - "off"
+      - "1"
+      - "2"
+
+sensor:
+  # Rently: keep a numeric temperature sensor so templates never go unavailable
+  - platform: template
+    sensors:
+      rently_current_temperature:
+        friendly_name: "Rently Current Temperature"
+        unit_of_measurement: "°F"
+        value_template: >
+          {% set v = states('input_number.rently_current_temp') %}
+          {{ (v if v not in ['unknown','unavailable','none',''] else '72') | float }}
+
+  # Sleeptracker session: Basic -> Bearer token
+  - platform: rest
+    name: Sleeptracker Session
+    resource: "https://auth.tsi.sleeptracker.com/v1/app/user/session"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: !secret sleeptracker_basic
+    payload: >
+      {
+        "clientVersion": "H-3.2.0.421",
+        "clientID": "sleeptracker-ios-tsi",
+        "id": "risE:session:{{ now().timestamp() }}",
+        "scope": "scope"
+      }
+    value_template: >
+      {% if value_json is defined and value_json.statusCode is defined %}
+        {{ value_json.statusCode }}
+      {% else %}
+        999
+      {% endif %}
+    json_attributes:
+      - token
+      - expirationTimeSecs
+      - statusMessage
+    scan_interval: 300
+
+shell_command:
+  rently_set_thermostat: >
+    python3 /config/python_scripts/rently_thermostat.py
+    "{{ states('input_number.rently_thermostat_setpoint') }}"
+    "{{ states('input_select.rently_thermostat_mode') }}"
+
+  # Optional: keep for manual testing only (not used by automations below)
+  rently_get_temperature: "python3 /config/python_scripts/rently_get_temperature.py"
+
+  rently_login_and_unlock: "python3 /config/python_scripts/rently_login_and_unlock.py"
+
+  # Pulls room_temp + mode + setpoints and writes to HA helpers (your new “truth source”)
+  rently_sync_status: "python3 /config/python_scripts/rently_sync_status.py"
+
+automation:
+  # ============================================================
+  # RENTLY (thermostat push)
+  # ============================================================
+  - alias: Update Rently Thermostat when setpoint changes
+    trigger:
+      - platform: state
+        entity_id: input_number.rently_thermostat_setpoint
+    condition:
+      - condition: template
+        value_template: "{{ trigger.from_state is not none }}"
+      - condition: template
+        value_template: "{{ trigger.to_state.state not in ['unknown','unavailable','none',''] }}"
+      - condition: template
+        value_template: "{{ trigger.from_state.state not in ['unknown','unavailable','none',''] }}"
+      - condition: template
+        value_template: "{{ (trigger.to_state.state | float) != (trigger.from_state.state | float) }}"
+      - condition: state
+        entity_id: input_boolean.rently_syncing
+        state: "off"
+    action:
+      - service: shell_command.rently_set_thermostat
+
+  - alias: Update Rently Thermostat when mode changes
+    trigger:
+      - platform: state
+        entity_id: input_select.rently_thermostat_mode
+    condition:
+      - condition: template
+        value_template: "{{ trigger.from_state is not none }}"
+      - condition: template
+        value_template: "{{ trigger.to_state.state not in ['unknown','unavailable','none',''] }}"
+      - condition: template
+        value_template: "{{ trigger.from_state.state not in ['unknown','unavailable','none',''] }}"
+      - condition: template
+        value_template: "{{ trigger.to_state.state != trigger.from_state.state }}"
+      - condition: state
+        entity_id: input_boolean.rently_syncing
+        state: "off"
+    action:
+      - service: shell_command.rently_set_thermostat
+
+  # ============================================================
+  # RENTLY (thermostat pull / sync)
+  # - Fast periodic sync catches wall-unit changes
+  # - "mode: single" prevents overlaps if the request runs long
+  # ============================================================
+  - alias: Rently - Sync thermostat status (fast)
+    mode: single
+    trigger:
+      - platform: time_pattern
+        seconds: "/15"
+    action:
+      - service: shell_command.rently_sync_status
+
+  # Sync quickly after YOU change something locally (feels instant)
+  - alias: Rently - Sync right after local changes
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id:
+          - input_select.rently_thermostat_mode
+          - input_number.rently_thermostat_setpoint
+    condition:
+      - condition: state
+        entity_id: input_boolean.rently_syncing
+        state: "off"
+    action:
+      - delay:
+          seconds: 2
+      - service: shell_command.rently_sync_status
+
+  # ============================================================
+  # BED MASSAGE (selector drives step command)
+  # ============================================================
+  - alias: Bed - Apply Massage Level (Both)
+    trigger:
+      - platform: state
+        entity_id: input_select.bed_massage_level
+    condition:
+      - condition: template
+        value_template: "{{ trigger.from_state is not none }}"
+      - condition: template
+        value_template: "{{ trigger.to_state.state in ['off','1','2'] }}"
+      - condition: template
+        value_template: "{{ trigger.to_state.state != trigger.from_state.state }}"
+    action:
+      - variables:
+          from_level: >
+            {% set m = {'off':0,'1':1,'2':2} %}
+            {{ m.get(trigger.from_state.state, 0) }}
+          to_level: >
+            {% set m = {'off':0,'1':1,'2':2} %}
+            {{ m.get(trigger.to_state.state, 0) }}
+          presses: "{{ ((to_level - from_level) + 3) % 3 }}"
+      - repeat:
+          count: "{{ presses | int(0) }}"
+          sequence:
+            - service: script.bed_massage_step_both
+            - delay:
+                seconds: 1
+climate:
+  - platform: climate_template
+    name: Rently Thermostat
+    unique_id: rently_thermostat
+
+    current_temperature_template: >
+      {% set v = states('input_number.rently_current_temp') %}
+      {{ (v if v not in ['unknown','unavailable','none',''] else '72') | float }}
+
+    target_temperature_template: >
+      {% set v = states('input_number.rently_thermostat_setpoint') %}
+      {{ (v if v not in ['unknown','unavailable','none',''] else '72') | float }}
+
+    hvac_mode_template: "{{ states('input_select.rently_thermostat_mode') | default('cool') }}"
+
+    modes:
+      - "off"
+      - "cool"
+      - "heat"
+
+    min_temp: 50
+    max_temp: 90
+    temp_step: 1
+
+    set_temperature:
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.rently_thermostat_setpoint
+        data:
+          value: "{{ temperature | float }}"
+
+    set_hvac_mode:
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.rently_thermostat_mode
+        data:
+          option: "{{ hvac_mode }}"
+
+# ============================================================
+# BED (Sleeptracker / Tempur) REST COMMANDS
+# ============================================================
+rest_command:
+  # Force-refresh session before bursts to avoid 419
+  sleeptracker_refresh_session:
+    url: "https://auth.tsi.sleeptracker.com/v1/app/user/session"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: !secret sleeptracker_basic
+    payload: >
+      {
+        "clientVersion": "H-3.2.0.421",
+        "clientID": "sleeptracker-ios-tsi",
+        "id": "risE:session:{{ now().timestamp() }}",
+        "scope": "scope"
+      }
+
+  bed_memory1:
+    url: "https://app.tsi.sleeptracker.com/actrack-client/v2/fpcsiot/processor/adjustableBaseControls"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: "Bearer {{ state_attr('sensor.sleeptracker_session', 'token') }}"
+    payload: >
+      {
+        "clientVersion": "H-3.2.0.421",
+        "bedControlCommand": 3,
+        "clientID": "sleeptracker-ios-tsi",
+        "id": "risE:adjustableBaseControls:{{ now().timestamp() }}"
+      }
+
+  bed_flat:
+    url: "https://app.tsi.sleeptracker.com/actrack-client/v2/fpcsiot/processor/adjustableBaseControls"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: "Bearer {{ state_attr('sensor.sleeptracker_session', 'token') }}"
+    payload: >
+      {
+        "clientVersion": "H-3.2.0.421",
+        "bedControlCommand": 2,
+        "clientID": "sleeptracker-ios-tsi",
+        "id": "risE:adjustableBaseControls:{{ now().timestamp() }}"
+      }
+
+  bed_massage_left:
+    url: "https://app.tsi.sleeptracker.com/actrack-client/v2/fpcsiot/processor/adjustableBaseControls"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: "Bearer {{ state_attr('sensor.sleeptracker_session', 'token') }}"
+    payload: >
+      {
+        "id": "risE:adjustableBaseControls:left:{{ now().timestamp() }}",
+        "requestStatus": true,
+        "clientVersion": "H-3.2.0.421",
+        "bedControlCommand": 210,
+        "massageAdjustment": 1,
+        "clientID": "sleeptracker-ios-tsi"
+      }
+
+  bed_massage_right:
+    url: "https://app.tsi.sleeptracker.com/actrack-client/v2/fpcsiot/processor/adjustableBaseControls"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: "Bearer {{ state_attr('sensor.sleeptracker_session', 'token') }}"
+    payload: >
+      {
+        "id": "risE:adjustableBaseControls:right:{{ now().timestamp() }}",
+        "requestStatus": true,
+        "clientVersion": "H-3.2.0.421",
+        "bedControlCommand": 211,
+        "massageAdjustment": 1,
+        "clientID": "sleeptracker-ios-tsi"
+      }
+
+script:
+  # ---- Rently ----
+  rently_update_thermostat:
+    alias: Rently Update Thermostat
+    mode: queued
+    sequence:
+      - service: shell_command.rently_set_thermostat
+
+  unlock_rently_door:
+    alias: Unlock Front Door
+    icon: mdi:door-open
+    sequence:
+      - service: shell_command.rently_login_and_unlock
+
+  # ---- Bed ----
+  bed_memory1:
+    alias: Bed - Memory 1
+    sequence:
+      - service: rest_command.bed_memory1
+
+  bed_flat:
+    alias: Bed - Flat
+    sequence:
+      - service: rest_command.bed_flat
+
+  # Single "step" script used by the selector automation
+  bed_massage_step_both:
+    alias: Bed - Massage Step (Both)
+    mode: queued
+    max: 10
+    sequence:
+      - service: rest_command.sleeptracker_refresh_session
+      - delay:
+          seconds: 1
+      - service: rest_command.bed_massage_left
+      - delay:
+          milliseconds: 300
+      - service: rest_command.bed_massage_right
