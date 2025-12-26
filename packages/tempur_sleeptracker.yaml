@@ -1,0 +1,138 @@
+# ============================================================
+# TEMPUR / SLEEPTRACKER (adjustable base)
+# ============================================================
+
+input_select:
+  bed_massage_level:
+    name: Bed Massage Level
+    options: ["off", "1", "2"]
+
+sensor:
+  - platform: rest
+    name: Sleeptracker Session
+    resource: "https://auth.tsi.sleeptracker.com/v1/app/user/session"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: !secret sleeptracker_basic
+    payload: >
+      {"clientVersion":"H-3.2.0.421","clientID":"sleeptracker-ios-tsi","id":"risE:session:{{ now().timestamp() }}","scope":"scope"}
+    value_template: >
+      {% if value_json is defined and value_json.statusCode is defined %}{{ value_json.statusCode }}{% else %}999{% endif %}
+    json_attributes:
+      - token
+      - expirationTimeSecs
+      - statusMessage
+    scan_interval: 300
+
+rest_command:
+  sleeptracker_refresh_session:
+    url: "https://auth.tsi.sleeptracker.com/v1/app/user/session"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: !secret sleeptracker_basic
+    payload: >
+      {"clientVersion":"H-3.2.0.421","clientID":"sleeptracker-ios-tsi","id":"risE:session:{{ now().timestamp() }}","scope":"scope"}
+
+  bed_flat:
+    url: "https://app.tsi.sleeptracker.com/actrack-client/v2/fpcsiot/processor/adjustableBaseControls"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: "Bearer {{ state_attr('sensor.sleeptracker_session', 'token') }}"
+    payload: >
+      {"clientVersion":"H-3.2.0.421","bedControlCommand":2,"clientID":"sleeptracker-ios-tsi","id":"risE:adjustableBaseControls:{{ now().timestamp() }}"}
+
+  bed_memory1:
+    url: "https://app.tsi.sleeptracker.com/actrack-client/v2/fpcsiot/processor/adjustableBaseControls"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: "Bearer {{ state_attr('sensor.sleeptracker_session', 'token') }}"
+    payload: >
+      {"clientVersion":"H-3.2.0.421","bedControlCommand":3,"clientID":"sleeptracker-ios-tsi","id":"risE:adjustableBaseControls:{{ now().timestamp() }}"}
+
+  bed_massage_left:
+    url: "https://app.tsi.sleeptracker.com/actrack-client/v2/fpcsiot/processor/adjustableBaseControls"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: "Bearer {{ state_attr('sensor.sleeptracker_session', 'token') }}"
+    payload: >
+      {"id":"risE:adjustableBaseControls:left:{{ now().timestamp() }}","requestStatus":true,"clientVersion":"H-3.2.0.421","bedControlCommand":210,"massageAdjustment":1,"clientID":"sleeptracker-ios-tsi"}
+
+  bed_massage_right:
+    url: "https://app.tsi.sleeptracker.com/actrack-client/v2/fpcsiot/processor/adjustableBaseControls"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Accept: "*/*"
+      Accept-Language: "en-US,en;q=0.9"
+      User-Agent: "Sleeptracker/421 CFNetwork/3860.200.71 Darwin/25.1.0"
+      Authorization: "Bearer {{ state_attr('sensor.sleeptracker_session', 'token') }}"
+    payload: >
+      {"id":"risE:adjustableBaseControls:right:{{ now().timestamp() }}","requestStatus":true,"clientVersion":"H-3.2.0.421","bedControlCommand":211,"massageAdjustment":1,"clientID":"sleeptracker-ios-tsi"}
+
+script:
+  bed_flat:
+    alias: Bed - Flat
+    sequence:
+      - service: rest_command.bed_flat
+
+  bed_memory1:
+    alias: Bed - Memory 1
+    sequence:
+      - service: rest_command.bed_memory1
+
+  bed_massage_step_both:
+    alias: Bed - Massage Step (Both)
+    mode: queued
+    max: 10
+    sequence:
+      - service: rest_command.sleeptracker_refresh_session
+      - delay:
+          seconds: 1
+      - service: rest_command.bed_massage_left
+      - delay:
+          milliseconds: 300
+      - service: rest_command.bed_massage_right
+
+automation:
+  - alias: Bed - Apply Massage Level (Both)
+    trigger:
+      - platform: state
+        entity_id: input_select.bed_massage_level
+    condition:
+      - condition: template
+        value_template: "{{ trigger.from_state is not none }}"
+      - condition: template
+        value_template: "{{ trigger.to_state.state in ['off','1','2'] }}"
+      - condition: template
+        value_template: "{{ trigger.to_state.state != trigger.from_state.state }}"
+    action:
+      - variables:
+          from_level: "{% set m={'off':0,'1':1,'2':2} %}{{ m.get(trigger.from_state.state,0) }}"
+          to_level: "{% set m={'off':0,'1':1,'2':2} %}{{ m.get(trigger.to_state.state,0) }}"
+          presses: "{{ ((to_level - from_level) + 3) % 3 }}"
+      - repeat:
+          count: "{{ presses | int(0) }}"
+          sequence:
+            - service: script.bed_massage_step_both
+            - delay:
+                seconds: 1

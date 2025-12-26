@@ -1,0 +1,120 @@
+# ============================================================
+# RENTLY (thermostat + door)
+# ============================================================
+
+input_boolean:
+  rently_syncing:
+    name: Rently Syncing
+    initial: false
+
+input_number:
+  rently_thermostat_setpoint:
+    name: Thermostat Setpoint
+    min: 50
+    max: 90
+    step: 1
+
+  rently_current_temp:
+    name: Current Temperature
+    min: 32
+    max: 120
+    step: 1
+
+input_select:
+  rently_thermostat_mode:
+    name: Thermostat Mode
+    options:
+      - "off"
+      - "cool"
+      - "heat"
+
+shell_command:
+  rently_set_thermostat: >
+    python3 /config/python_scripts/rently_thermostat.py
+    "{{ states('input_number.rently_thermostat_setpoint') }}"
+    "{{ states('input_select.rently_thermostat_mode') }}"
+
+  rently_sync_status: "python3 /config/python_scripts/rently_sync_status.py"
+
+  rently_login_and_unlock: "python3 /config/python_scripts/rently_login_and_unlock.py"
+
+automation:
+  - alias: Rently - Push thermostat when setpoint changes
+    trigger:
+      - platform: state
+        entity_id: input_number.rently_thermostat_setpoint
+    condition:
+      - condition: template
+        value_template: "{{ trigger.from_state is not none }}"
+      - condition: template
+        value_template: "{{ trigger.to_state.state not in ['unknown','unavailable','none',''] }}"
+      - condition: template
+        value_template: "{{ trigger.from_state.state not in ['unknown','unavailable','none',''] }}"
+      - condition: template
+        value_template: "{{ (trigger.to_state.state | float) != (trigger.from_state.state | float) }}"
+      - condition: state
+        entity_id: input_boolean.rently_syncing
+        state: "off"
+    action:
+      - service: shell_command.rently_set_thermostat
+
+  - alias: Rently - Push thermostat when mode changes
+    trigger:
+      - platform: state
+        entity_id: input_select.rently_thermostat_mode
+    condition:
+      - condition: template
+        value_template: "{{ trigger.from_state is not none }}"
+      - condition: template
+        value_template: "{{ trigger.to_state.state not in ['unknown','unavailable','none',''] }}"
+      - condition: template
+        value_template: "{{ trigger.from_state.state not in ['unknown','unavailable','none',''] }}"
+      - condition: template
+        value_template: "{{ trigger.to_state.state != trigger.from_state.state }}"
+      - condition: state
+        entity_id: input_boolean.rently_syncing
+        state: "off"
+    action:
+      - service: shell_command.rently_set_thermostat
+
+  - alias: Rently - Sync thermostat status (fast)
+    mode: single
+    trigger:
+      - platform: time_pattern
+        seconds: "/15"
+    action:
+      - service: shell_command.rently_sync_status
+
+climate:
+  - platform: climate_template
+    name: Rently Thermostat
+    unique_id: rently_thermostat
+
+    current_temperature_template: >
+      {% set v = states('input_number.rently_current_temp') %}
+      {{ (v if v not in ['unknown','unavailable','none',''] else '72') | float }}
+
+    target_temperature_template: >
+      {% set v = states('input_number.rently_thermostat_setpoint') %}
+      {{ (v if v not in ['unknown','unavailable','none',''] else '72') | float }}
+
+    hvac_mode_template: "{{ states('input_select.rently_thermostat_mode') | default('cool') }}"
+
+    modes: ["off", "cool", "heat"]
+    min_temp: 50
+    max_temp: 90
+    temp_step: 1
+
+    set_temperature:
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.rently_thermostat_setpoint
+        data:
+          value: "{{ temperature | float }}"
+
+    set_hvac_mode:
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.rently_thermostat_mode
+        data:
+          option: "{{ hvac_mode }}"
