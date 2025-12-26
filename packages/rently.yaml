@@ -1,5 +1,5 @@
 # ============================================================
-# RENTLY (thermostat + door)
+# RENTLY (thermostat + door + sync)
 # ============================================================
 
 input_boolean:
@@ -28,17 +28,30 @@ input_select:
       - "cool"
       - "heat"
 
+sensor:
+  - platform: template
+    sensors:
+      rently_current_temperature:
+        friendly_name: "Rently Current Temperature"
+        unit_of_measurement: "°F"
+        value_template: >
+          {% set v = states('input_number.rently_current_temp') %}
+          {{ (v if v not in ['unknown','unavailable','none',''] else '72') | float }}
+
 shell_command:
   rently_set_thermostat: >
     python3 /config/python_scripts/rently_thermostat.py
     "{{ states('input_number.rently_thermostat_setpoint') }}"
     "{{ states('input_select.rently_thermostat_mode') }}"
 
-  rently_sync_status: "python3 /config/python_scripts/rently_sync_status.py"
+  rently_get_temperature: "python3 /config/python_scripts/rently_get_temperature.py"
 
   rently_login_and_unlock: "python3 /config/python_scripts/rently_login_and_unlock.py"
 
+  rently_sync_status: "python3 /config/python_scripts/rently_sync_status.py"
+
 automation:
+  # ---- Push local helper changes -> Rently (guard against feedback loop) ----
   - alias: Rently - Push thermostat when setpoint changes
     trigger:
       - platform: state
@@ -77,13 +90,24 @@ automation:
     action:
       - service: shell_command.rently_set_thermostat
 
-  - alias: Rently - Sync thermostat status (fast)
+  # ---- Read Rently status -> HA helpers (fast) ----
+  - alias: Rently - Sync thermostat status periodically (fast)
     mode: single
     trigger:
       - platform: time_pattern
         seconds: "/15"
     action:
       - service: shell_command.rently_sync_status
+
+  # ---- Optional: update "current temp" helper from device payload ----
+  # (Your rently_get_temperature.py currently finds status.room_temp; keep it if you want)
+  - alias: Rently - Update current temperature periodically
+    mode: single
+    trigger:
+      - platform: time_pattern
+        minutes: "/5"
+    action:
+      - service: shell_command.rently_get_temperature
 
 climate:
   - platform: climate_template
@@ -100,11 +124,16 @@ climate:
 
     hvac_mode_template: "{{ states('input_select.rently_thermostat_mode') | default('cool') }}"
 
-    modes: ["off", "cool", "heat"]
+    modes:
+      - "off"
+      - "cool"
+      - "heat"
+
     min_temp: 50
     max_temp: 90
     temp_step: 1
 
+    # Update helper only; automations send to Rently
     set_temperature:
       - service: input_number.set_value
         target:

@@ -5,9 +5,13 @@
 input_select:
   bed_massage_level:
     name: Bed Massage Level
-    options: ["off", "1", "2"]
+    options:
+      - "off"
+      - "1"
+      - "2"
 
 sensor:
+  # Sleeptracker Session (Basic -> Bearer token)
   - platform: rest
     name: Sleeptracker Session
     resource: "https://auth.tsi.sleeptracker.com/v1/app/user/session"
@@ -21,7 +25,11 @@ sensor:
     payload: >
       {"clientVersion":"H-3.2.0.421","clientID":"sleeptracker-ios-tsi","id":"risE:session:{{ now().timestamp() }}","scope":"scope"}
     value_template: >
-      {% if value_json is defined and value_json.statusCode is defined %}{{ value_json.statusCode }}{% else %}999{% endif %}
+      {% if value_json is defined and value_json.statusCode is defined %}
+        {{ value_json.statusCode }}
+      {% else %}
+        999
+      {% endif %}
     json_attributes:
       - token
       - expirationTimeSecs
@@ -29,6 +37,7 @@ sensor:
     scan_interval: 300
 
 rest_command:
+  # Force-refresh session before bursts to avoid 419
   sleeptracker_refresh_session:
     url: "https://auth.tsi.sleeptracker.com/v1/app/user/session"
     method: POST
@@ -65,6 +74,7 @@ rest_command:
     payload: >
       {"clientVersion":"H-3.2.0.421","bedControlCommand":3,"clientID":"sleeptracker-ios-tsi","id":"risE:adjustableBaseControls:{{ now().timestamp() }}"}
 
+  # Massage step (LEFT)
   bed_massage_left:
     url: "https://app.tsi.sleeptracker.com/actrack-client/v2/fpcsiot/processor/adjustableBaseControls"
     method: POST
@@ -77,6 +87,7 @@ rest_command:
     payload: >
       {"id":"risE:adjustableBaseControls:left:{{ now().timestamp() }}","requestStatus":true,"clientVersion":"H-3.2.0.421","bedControlCommand":210,"massageAdjustment":1,"clientID":"sleeptracker-ios-tsi"}
 
+  # Massage step (RIGHT)
   bed_massage_right:
     url: "https://app.tsi.sleeptracker.com/actrack-client/v2/fpcsiot/processor/adjustableBaseControls"
     method: POST
@@ -127,8 +138,12 @@ automation:
         value_template: "{{ trigger.to_state.state != trigger.from_state.state }}"
     action:
       - variables:
-          from_level: "{% set m={'off':0,'1':1,'2':2} %}{{ m.get(trigger.from_state.state,0) }}"
-          to_level: "{% set m={'off':0,'1':1,'2':2} %}{{ m.get(trigger.to_state.state,0) }}"
+          from_level: >
+            {% set m = {'off':0,'1':1,'2':2} %}
+            {{ m.get(trigger.from_state.state, 0) }}
+          to_level: >
+            {% set m = {'off':0,'1':1,'2':2} %}
+            {{ m.get(trigger.to_state.state, 0) }}
           presses: "{{ ((to_level - from_level) + 3) % 3 }}"
       - repeat:
           count: "{{ presses | int(0) }}"
